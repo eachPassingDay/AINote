@@ -174,7 +174,6 @@ public class NoteServiceImpl implements NoteService {
 
     private RerankResult performRerank(String query, List<Document> documents) {
         try {
-            System.out.println("DEBUG: performRerank called with query: " + query);
             List<String> docContents = documents.stream()
                     .map(Document::getContent)
                     .collect(Collectors.toList());
@@ -188,20 +187,15 @@ public class NoteServiceImpl implements NoteService {
                     "model", "gte-rerank",
                     "input", input);
 
-            System.out.println(
-                    "DEBUG: performRerank request body: " + new ObjectMapper().writeValueAsString(requestBody));
-
             RestClient restClient = restClientBuilder.build();
             // Use the standard URL
             String responseBody = restClient.post()
-                    .uri("https://dashscope.aliyuncs.com/api/v1/services/rerank/text-ranking/text-ranking")
+                    .uri("https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank")
                     .header("Authorization", "Bearer " + dashscopeApiKey)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(requestBody)
                     .retrieve()
                     .body(String.class);
-
-            System.out.println("DEBUG: performRerank response: " + responseBody);
 
             ObjectMapper mapper = new ObjectMapper();
             JsonNode root = mapper.readTree(responseBody);
@@ -211,7 +205,6 @@ public class NoteServiceImpl implements NoteService {
             JsonNode resultsNode = root.path("output").path("results");
 
             if (resultsNode.isMissingNode() || resultsNode.isEmpty()) {
-                System.out.println("DEBUG: performRerank empty results");
                 return null;
             }
 
@@ -221,7 +214,6 @@ public class NoteServiceImpl implements NoteService {
                     topResult.path("relevance_score").asDouble());
 
         } catch (Exception e) {
-            System.out.println("ERROR: performRerank failed: " + e.getMessage());
             e.printStackTrace();
             return null;
         }
@@ -285,7 +277,6 @@ public class NoteServiceImpl implements NoteService {
 
     private String executeRerankLogic(String query, List<Document> initialResults, double threshold) {
         try {
-            System.out.println("DEBUG: executeRerankLogic called with query: " + query);
             // 1. Prepare Request Data
             List<String> documents = initialResults.stream()
                     .map(Document::getContent)
@@ -300,20 +291,15 @@ public class NoteServiceImpl implements NoteService {
                     "model", "gte-rerank",
                     "input", input);
 
-            System.out.println(
-                    "DEBUG: executeRerankLogic request body: " + new ObjectMapper().writeValueAsString(requestBody));
-
             // 2. Call DashScope API manually
             RestClient restClient = restClientBuilder.build();
             String responseBody = restClient.post()
-                    .uri("https://dashscope.aliyuncs.com/api/v1/services/rerank/text-ranking/text-ranking")
+                    .uri("https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank")
                     .header("Authorization", "Bearer " + dashscopeApiKey)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(requestBody)
                     .retrieve()
                     .body(String.class);
-
-            System.out.println("DEBUG: executeRerankLogic response: " + responseBody);
 
             // 3. Parse Response
             ObjectMapper mapper = new ObjectMapper();
@@ -331,8 +317,6 @@ public class NoteServiceImpl implements NoteService {
             JsonNode topResult = resultsNode.get(0);
             int index = topResult.path("index").asInt();
             double score = topResult.path("relevance_score").asDouble();
-
-            System.out.println("Top Rerank Score: " + score);
 
             if (score >= threshold) {
                 // Return the original document content based on index
