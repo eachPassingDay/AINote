@@ -18,14 +18,14 @@ public class NoteController {
         return noteService.generateSummary(noteRequest);
     }
 
-    @PostMapping("/vector/test")
-    public String testVectorStore(@RequestBody NoteRequestDTO noteRequest) {
+    @PostMapping("/add")
+    public String addNote(@RequestBody NoteRequestDTO noteRequest) {
         noteService.ingestNote(noteRequest);
-        return "Note ingested successfully!";
+        return "Note processing started. Segments will be merged or added as new notes.";
     }
 
     @GetMapping("/search")
-    public String search(@RequestParam String query, @RequestParam(defaultValue = "0.5") double threshold) {
+    public String search(@RequestParam String query, @RequestParam(defaultValue = "0.6") double threshold) {
         return noteService.semanticSearch(query, threshold);
     }
 }
