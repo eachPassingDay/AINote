@@ -24,6 +24,11 @@ public class NoteController {
         return "Note processing started. Segments will be merged or added as new notes.";
     }
 
+    @PostMapping("/merge")
+    public String mergeNotes(@RequestParam String sourceId, @RequestParam String targetId) {
+        return noteService.mergeNotes(sourceId, targetId);
+    }
+
     @GetMapping("/search")
     public String search(@RequestParam String query, @RequestParam(defaultValue = "0.6") double threshold) {
         return noteService.semanticSearch(query, threshold);

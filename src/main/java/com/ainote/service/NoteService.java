@@ -9,5 +9,9 @@ public interface NoteService {
 
     void ingestNote(NoteRequestDTO noteRequest);
 
+    void processNoteAsync(String noteId, NoteRequestDTO noteRequest);
+
     String semanticSearch(String query, double threshold);
+
+    String mergeNotes(String sourceId, String targetId);
 }
