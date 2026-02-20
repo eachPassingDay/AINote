@@ -1,10 +1,12 @@
 package com.ainote.entity;
 
 import jakarta.persistence.*;
+import org.hibernate.envers.Audited;
 import lombok.Data;
 import java.time.LocalDateTime;
 
 @Entity
+@Audited
 @Table(name = "notes")
 @Data
 public class Note {

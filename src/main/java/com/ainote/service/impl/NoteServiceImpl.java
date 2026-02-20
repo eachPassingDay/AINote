@@ -45,6 +45,9 @@ public class NoteServiceImpl implements NoteService {
     private final NoteRepository noteRepository;
     private final ApplicationEventPublisher eventPublisher;
 
+    @jakarta.persistence.PersistenceContext
+    private jakarta.persistence.EntityManager entityManager;
+
     @Value("${spring.ai.dashscope.api-key}")
     private String dashscopeApiKey;
 
@@ -166,8 +169,7 @@ public class NoteServiceImpl implements NoteService {
                 System.out.println("====== [DEBUG] AI Analysis Result ======");
                 System.out.println(analysisResult);
 
-                note.setAiMetadata(analysisResult); // Assuming setter exists (Lombok @Data on Note)
-
+                note.setAiMetadata(analysisResult);
             } catch (Exception e) {
                 System.err.println("AI Analysis failed: " + e.getMessage());
                 e.printStackTrace();
@@ -186,12 +188,12 @@ public class NoteServiceImpl implements NoteService {
             noteRepository.save(note);
 
             // 3. Vectorize Current Note so it can be found in future
-            vectorizeContent(processedContent, note.getId(), note.getTitle());
+            vectorizeContent(processedContent, note.getId(), note.getTitle(), note.getAiMetadata());
 
             // 4. Find Similar Notes (for User Information)
             System.out.println("====== Top 5 Similar Notes (Potential Merge Targets) ======");
-            String analysisResult = findTopSimilarNotes(processedContent, note.getId());
-            System.out.println(analysisResult);
+            String similarNotesResult = findTopSimilarNotes(processedContent, note.getId());
+            System.out.println(similarNotesResult);
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -209,63 +211,61 @@ public class NoteServiceImpl implements NoteService {
     }
 
     private String findTopSimilarNotes(String query, String currentNoteId) {
-        // Increase topK to 50 to allow for filtering of ghosts/deleted
         List<Document> initialResults = vectorStore.similaritySearch(
                 org.springframework.ai.vectorstore.SearchRequest.query(query).withTopK(50));
-
-        System.out.println(
-                "DEBUG: findTopSimilarNotes query='" + query + "', initialResults size=" + initialResults.size());
 
         List<Document> candidates = new ArrayList<>();
         List<String> ghostsToRemove = new ArrayList<>();
 
         for (Document doc : initialResults) {
-            String id = (String) doc.getMetadata().get("note_id");
-            // System.out.println("DEBUG: Checking doc id=" + id + ", currentNoteId=" +
-            // currentNoteId);
+            Object rawId = doc.getMetadata().get("note_id");
+            if (rawId != null) {
+                // 【核心修复】：防御性处理引号和首尾空格，防止 PGVector 反序列化带来的字面量引号问题
+                String id = rawId.toString().replaceAll("^\"|\"$", "").trim();
 
-            if (id != null && !id.equals(currentNoteId)) { // Exclude self
-                Optional<Note> n = noteRepository.findById(id);
-                if (n.isPresent()) {
-                    boolean isDeleted = n.get().isDeleted();
-                    // System.out.println("DEBUG: Note found in DB. deleted=" + isDeleted);
-                    if (!isDeleted) {
-                        candidates.add(doc);
+                if (!id.equals(currentNoteId)) { // 正常排除自身
+                    Optional<Note> n = noteRepository.findById(id);
+                    if (n.isPresent()) {
+                        boolean isDeleted = n.get().isDeleted();
+                        if (!isDeleted) {
+                            candidates.add(doc);
+                        }
+                    } else {
+                        System.out
+                                .println("DEBUG: Found orphan vector for noteId=[" + id + "]. Queueing for deletion.");
+                        ghostsToRemove.add(doc.getId()); // 注意这里删的是向量ID，是正确的
                     }
                 } else {
-                    System.out.println("DEBUG: Found orphan vector for noteId=" + id + ". Queueing for deletion.");
-                    ghostsToRemove.add(doc.getId());
+                    // 跳过自身向量
+                    System.out.println("DEBUG: Skipping self vector for currentNoteId=[" + currentNoteId + "]");
                 }
-            } else {
-                // System.out.println("DEBUG: Skipping self or null id.");
             }
         }
 
-        // Remove ghosts
+        // 物理清理孤儿向量
         if (!ghostsToRemove.isEmpty()) {
             try {
                 vectorStore.delete(ghostsToRemove);
-                System.out.println("DEBUG: Removed " + ghostsToRemove.size() + " orphan vectors.");
+                System.out.println("DEBUG: Successfully removed " + ghostsToRemove.size() + " orphan vectors.");
             } catch (Exception e) {
                 System.err.println("DEBUG: Failed to remove orphans: " + e.getMessage());
             }
         }
 
-        if (candidates.isEmpty())
+        if (candidates.isEmpty()) {
             return "No similar notes found.";
+        }
 
-        // Rerank top 5 (Printing logic)
+        // 组装并返回前 5 条有效相似笔记
         StringBuilder sb = new StringBuilder();
         int count = 0;
         for (Document doc : candidates) {
             if (count >= 5)
                 break;
-            // Double check threshold? User said "satisfy min similarity".
-            // Vector search score is distance usually.
-            // SimpleVectorStore / PgVector might differ.
-            // Let's assuming sorted descending by relevance.
-            sb.append(String.format("[%d] ID: %s | Score: N/A | Preview: %.50s...\n",
-                    count + 1, doc.getMetadata().get("note_id"), doc.getContent().replace("\n", " ")));
+            // 同样处理打印出来的 ID
+            String displayId = doc.getMetadata().get("note_id").toString().replaceAll("^\"|\"$", "").trim();
+            sb.append(String.format("[%d] ID: %s | Preview: %.50s...\n",
+                    count + 1, displayId, doc.getContent().replace("\n", " ")));
             count++;
         }
         return sb.toString();
@@ -321,45 +321,85 @@ public class NoteServiceImpl implements NoteService {
         }
     }
 
-    // Helper to vectorize content specifically for existing notes (Merge flow)
     private void vectorizeContent(String content, String noteId, String title) {
-        // Reuse the logic from ingestNote but skip DB creation and use existing ID
-        // 1. Process
-        String systemInstruction = """
-                You are a strict data processing engine.
-                Rules:
-                1. Insert the delimiter '%s' between distinct, unrelated topics.
-                2. Do NOT change the original wording unless there are formatting errors.
-                3. OUTPUT ONLY THE PROCESSED TEXT.
-                """.formatted(SEMANTIC_DELIMITER);
+        vectorizeContent(content, noteId, title, null);
+    }
 
-        String processedContent = chatModel.call(
-                new Prompt(List.of(
-                        new SystemMessage(systemInstruction),
-                        new UserMessage(content))))
-                .getResult().getOutput().getContent();
+    private void vectorizeContent(String content, String noteId, String title,
+            com.ainote.dto.NoteAnalysisResult analysisResult) {
+        System.out.println("====== [DEBUG] Starting vectorizeContent for Note: " + noteId + " ======");
+        try {
+            String systemInstruction = """
+                    You are a strict data processing engine.
+                    Rules:
+                    1. Insert the delimiter '||||' between distinct, unrelated topics.
+                    2. Do NOT change the original wording unless there are formatting errors.
+                    3. OUTPUT ONLY THE PROCESSED TEXT.
+                    """;
 
-        String[] semanticSegments = processedContent.split(Pattern.quote(SEMANTIC_DELIMITER));
-        List<Document> documentsToStore = new ArrayList<>();
-        TokenTextSplitter textSplitter = new TokenTextSplitter(500, 100, 5, 10000, true);
+            // 获取 AI 分段处理后的文本
+            String processedContent = chatModel.call(
+                    new Prompt(List.of(
+                            new SystemMessage(systemInstruction),
+                            new UserMessage(content))))
+                    .getResult().getOutput().getContent();
 
-        for (String segment : semanticSegments) {
-            String cleanSegment = segment.strip();
-            if (cleanSegment.isBlank())
-                continue;
+            System.out.println("====== [DEBUG] Vectorize AI Split Output ======\n" + processedContent);
 
-            Document segmentDoc = new Document(cleanSegment,
-                    Map.of(
-                            "title", title != null ? title : "",
-                            "note_id", noteId,
-                            "original_length", cleanSegment.length()));
+            // 【修复1】兜底逻辑：如果 AI 抽风返回了空内容，我们退回到使用原始 content
+            if (processedContent == null || processedContent.isBlank()
+                    || processedContent.replace("||||", "").isBlank()) {
+                System.out.println(
+                        "====== [DEBUG] AI returned empty or invalid split, falling back to original content.");
+                processedContent = content;
+            }
 
-            documentsToStore.addAll(textSplitter.apply(List.of(segmentDoc)));
-        }
+            String[] semanticSegments = processedContent.split(Pattern.quote("||||"));
+            List<Document> documentsToStore = new ArrayList<>();
+            TokenTextSplitter textSplitter = new TokenTextSplitter(500, 100, 5, 10000, true);
 
-        if (!documentsToStore.isEmpty()) {
-            vectorStore.add(documentsToStore);
+            for (String segment : semanticSegments) {
+                String cleanSegment = segment.strip();
+                if (cleanSegment.isBlank())
+                    continue;
 
+                Map<String, Object> metadata = new java.util.HashMap<>();
+                metadata.put("title", title != null ? title : "");
+                metadata.put("note_id", noteId);
+                metadata.put("original_length", cleanSegment.length());
+
+                if (analysisResult != null) {
+                    if (analysisResult.primaryDomain() != null)
+                        metadata.put("primaryDomain", analysisResult.primaryDomain());
+                    if (analysisResult.contentType() != null)
+                        metadata.put("contentType", analysisResult.contentType());
+                    // Postgres vector store metadata usually handles basic types. Lists might
+                    // require specific handling or flatten.
+                    // For simply hybrid search, let's keep strings.
+                }
+
+                Document segmentDoc = new Document(cleanSegment, metadata);
+
+                // 【修复2】防止过短的文本被 Splitter 吞掉。如果文本较短，直接添加为 Document；否则使用 Splitter
+                if (cleanSegment.length() < 100) {
+                    documentsToStore.add(segmentDoc);
+                } else {
+                    documentsToStore.addAll(textSplitter.apply(List.of(segmentDoc)));
+                }
+            }
+
+            // 【修复3】增加保存结果日志
+            if (!documentsToStore.isEmpty()) {
+                vectorStore.add(documentsToStore);
+                System.out.println("====== [DEBUG] Successfully added " + documentsToStore.size()
+                        + " document chunks to VectorStore.");
+            } else {
+                System.err.println("====== [ERROR] documentsToStore is empty! Note was NOT vectorized.");
+            }
+
+        } catch (Exception e) {
+            System.err.println("====== [ERROR] Failed during vectorizeContent: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -487,7 +527,16 @@ public class NoteServiceImpl implements NoteService {
             return "One or both notes are deleted.";
         }
 
-        return mergeAndSave(targetNote, sourceNote.getContent());
+        // 1. Merge content into target note
+        String result = mergeAndSave(targetNote, sourceNote.getContent());
+
+        // 2. Mark source note as deleted (Envers will track this as a historical
+        // version)
+        sourceNote.setDeleted(true);
+        sourceNote.setUpdatedAt(java.time.LocalDateTime.now());
+        noteRepository.save(sourceNote);
+
+        return result;
     }
 
     private String mergeAndSave(Note existingNote, String newContent) {
@@ -527,7 +576,7 @@ public class NoteServiceImpl implements NoteService {
         noteRepository.save(existingNote);
 
         // 3. Update Vector Store for Target Note
-        vectorizeContent(mergedContent, existingNote.getId(), existingNote.getTitle());
+        vectorizeContent(mergedContent, existingNote.getId(), existingNote.getTitle(), existingNote.getAiMetadata());
 
         // 4. Soft Delete Source Note (Logic handled by caller usually but here we
         // process content merger)
@@ -536,5 +585,225 @@ public class NoteServiceImpl implements NoteService {
         // Wait, current mergeAndSave was private helper.
         // Let's modify mergeNotes to handle source deletion.
         return "Merged successfully. New content length: " + mergedContent.length();
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public List<com.ainote.dto.NoteHistoryDTO> getNoteHistory(String noteId) {
+        org.hibernate.envers.AuditReader reader = org.hibernate.envers.AuditReaderFactory.get(entityManager);
+
+        List<Object[]> results = reader.createQuery()
+                .forRevisionsOfEntity(Note.class, false, true)
+                .add(org.hibernate.envers.query.AuditEntity.id().eq(noteId))
+                .addOrder(org.hibernate.envers.query.AuditEntity.revisionNumber().desc())
+                .getResultList();
+
+        List<com.ainote.dto.NoteHistoryDTO> historyList = new ArrayList<>();
+        for (Object[] row : results) {
+            Note note = (Note) row[0];
+            org.hibernate.envers.DefaultRevisionEntity revisionEntity = (org.hibernate.envers.DefaultRevisionEntity) row[1];
+            org.hibernate.envers.RevisionType revisionType = (org.hibernate.envers.RevisionType) row[2];
+
+            com.ainote.dto.NoteHistoryDTO dto = new com.ainote.dto.NoteHistoryDTO();
+            dto.setRevisionId(revisionEntity.getId());
+            dto.setRevisionDate(revisionEntity.getRevisionDate());
+            dto.setRevisionType(revisionType.name());
+            dto.setTitle(note.getTitle());
+            dto.setSummary(note.getSummary());
+            dto.setStatus(note.getStatus() != null ? note.getStatus().name() : "UNKNOWN");
+
+            historyList.add(dto);
+        }
+        return historyList;
+    }
+
+    @Override
+    public Note getNoteRevision(String noteId, Number revision) {
+        org.hibernate.envers.AuditReader reader = org.hibernate.envers.AuditReaderFactory.get(entityManager);
+        return reader.find(Note.class, noteId, revision);
+    }
+
+    @Override
+    @org.springframework.transaction.annotation.Transactional
+    public void rollbackNote(String noteId, Number revision) {
+        org.hibernate.envers.AuditReader reader = org.hibernate.envers.AuditReaderFactory.get(entityManager);
+        Note historicalNote = reader.find(Note.class, noteId, revision);
+
+        if (historicalNote == null) {
+            throw new RuntimeException("Revision not found: " + revision);
+        }
+
+        Optional<Note> currentNoteOpt = noteRepository.findById(noteId);
+        if (currentNoteOpt.isEmpty()) {
+            throw new RuntimeException("Note not found: " + noteId);
+        }
+
+        Note currentNote = currentNoteOpt.get();
+        // Restore fields
+        currentNote.setTitle(historicalNote.getTitle());
+        currentNote.setContent(historicalNote.getContent());
+        currentNote.setSummary(historicalNote.getSummary());
+        currentNote.setStatus(historicalNote.getStatus());
+        currentNote.setDeleted(false); // Make sure it's active if we rollback
+        currentNote.setUpdatedAt(java.time.LocalDateTime.now());
+
+        noteRepository.save(currentNote);
+
+        noteRepository.save(currentNote);
+
+        // Re-vectorize
+        vectorizeContent(currentNote.getContent(), currentNote.getId(), currentNote.getTitle(),
+                currentNote.getAiMetadata());
+    }
+
+    @Override
+    public String chatWithNotes(String query) {
+        return chatWithNotes(query, null, null);
+    }
+
+    @Override
+    public String chatWithNotes(String query, String filterDomain, String filterType) {
+        List<String> contexts = retrieveContexts(query, 5, 0.45, filterDomain, filterType);
+
+        if (contexts.isEmpty()) {
+            return "I couldn't find any relevant notes to answer your question.";
+        }
+
+        String contextStr = String.join("\n\n---\n\n", contexts);
+
+        String systemPrompt = """
+                You are a personal knowledge base assistant. Answer the user's question based ONLY on the following context.
+                If the answer is not in the context, say "I don't have enough information in your notes to answer that."
+
+                Context:
+                %s
+                """;
+
+        SystemMessage systemMessage = new SystemMessage(systemPrompt.formatted(contextStr));
+        UserMessage userMessage = new UserMessage(query);
+
+        return chatModel.call(new Prompt(List.of(systemMessage, userMessage))).getResult().getOutput().getContent();
+    }
+
+    private List<String> retrieveContexts(String query, int topK, double threshold) {
+        return retrieveContexts(query, topK, threshold, null, null);
+    }
+
+    private List<String> retrieveContexts(String query, int topK, double threshold, String filterDomain,
+            String filterType) {
+        // 1. Build Filter Expression
+        org.springframework.ai.vectorstore.SearchRequest request = org.springframework.ai.vectorstore.SearchRequest
+                .query(query).withTopK(20);
+
+        List<String> filterExpressions = new ArrayList<>();
+        if (filterDomain != null && !filterDomain.isEmpty()) {
+            filterExpressions.add("primaryDomain == '" + filterDomain + "'");
+        }
+        if (filterType != null && !filterType.isEmpty()) {
+            filterExpressions.add("contentType == '" + filterType + "'");
+        }
+
+        if (!filterExpressions.isEmpty()) {
+            String filterStr = String.join(" AND ", filterExpressions);
+            request = request.withFilterExpression(filterStr);
+        }
+
+        // 2. Initial Retrieval
+        List<Document> initialResults = vectorStore.similaritySearch(request);
+
+        if (initialResults.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+
+        // 2. Filter Deleted Notes
+        List<Document> activeResults = new ArrayList<>();
+        for (Document doc : initialResults) {
+            Object rawId = doc.getMetadata().get("note_id");
+            if (rawId != null) {
+                String id = rawId.toString().replaceAll("^\"|\"$", "").trim();
+                Optional<Note> noteOpt = noteRepository.findById(id);
+                if (noteOpt.isPresent() && !noteOpt.get().isDeleted()) {
+                    activeResults.add(doc);
+                }
+            }
+        }
+
+        if (activeResults.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+
+        // 3. Rerank
+        try {
+            List<String> docContents = activeResults.stream()
+                    .map(Document::getContent)
+                    .collect(Collectors.toList());
+
+            Map<String, Object> input = Map.of(
+                    "query", query,
+                    "documents", docContents);
+
+            Map<String, Object> requestBody = Map.of(
+                    "model", "gte-rerank",
+                    "input", input);
+
+            RestClient restClient = restClientBuilder.build();
+            String responseBody = restClient.post()
+                    .uri("https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank")
+                    .header("Authorization", "Bearer " + dashscopeApiKey)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(requestBody)
+                    .retrieve()
+                    .body(String.class);
+
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode root = mapper.readTree(responseBody);
+            JsonNode resultsNode = root.path("output").path("results");
+
+            if (resultsNode.isMissingNode() || resultsNode.isEmpty()) {
+                return java.util.Collections.emptyList();
+            }
+
+            List<String> topContexts = new ArrayList<>();
+            for (JsonNode resultNode : resultsNode) {
+                int index = resultNode.path("index").asInt();
+                double score = resultNode.path("relevance_score").asDouble();
+
+                if (score >= threshold) {
+                    topContexts.add(activeResults.get(index).getContent());
+                    if (topContexts.size() >= topK)
+                        break;
+                }
+            }
+            return topContexts;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    @Override
+    public Map<String, List<com.ainote.dto.TagStatDTO>> getKnowledgeTags() {
+        Map<String, List<com.ainote.dto.TagStatDTO>> stats = new java.util.HashMap<>();
+
+        // Entities
+        List<Object[]> entityRows = noteRepository.countTopEntities();
+        stats.put("entities", entityRows.stream()
+                .map(row -> new com.ainote.dto.TagStatDTO((String) row[0], ((Number) row[1]).longValue()))
+                .collect(Collectors.toList()));
+
+        // Domains
+        List<Object[]> domainRows = noteRepository.countTopDomains();
+        stats.put("domains", domainRows.stream()
+                .map(row -> new com.ainote.dto.TagStatDTO((String) row[0], ((Number) row[1]).longValue()))
+                .collect(Collectors.toList()));
+
+        // Content Types
+        List<Object[]> typeRows = noteRepository.countTopContentTypes();
+        stats.put("contentTypes", typeRows.stream()
+                .map(row -> new com.ainote.dto.TagStatDTO((String) row[0], ((Number) row[1]).longValue()))
+                .collect(Collectors.toList()));
+
+        return stats;
     }
 }
