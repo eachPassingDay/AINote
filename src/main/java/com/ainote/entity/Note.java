@@ -1,8 +1,13 @@
 package com.ainote.entity;
 
+import com.ainote.dto.NoteAnalysisResult;
+import com.ainote.enums.NoteStatus;
 import jakarta.persistence.*;
-import org.hibernate.envers.Audited;
 import lombok.Data;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.envers.Audited;
+import org.hibernate.type.SqlTypes;
+
 import java.time.LocalDateTime;
 
 @Entity
@@ -32,7 +37,10 @@ public class Note {
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status")
-    private com.ainote.enums.NoteStatus status;
+    private NoteStatus status;
+
+    @Column(name = "status_message", columnDefinition = "TEXT")
+    private String statusMessage;
 
     @Version
     private long version;
@@ -40,7 +48,19 @@ public class Note {
     @Column(name = "deleted")
     private boolean deleted = false;
 
-    @org.hibernate.annotations.JdbcTypeCode(org.hibernate.type.SqlTypes.JSON)
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "ai_metadata", columnDefinition = "jsonb")
-    private com.ainote.dto.NoteAnalysisResult aiMetadata;
+    private NoteAnalysisResult aiMetadata;
+
+    @PrePersist
+    protected void onCreate() {
+        LocalDateTime now = LocalDateTime.now();
+        if (createdAt == null) createdAt = now;
+        updatedAt = now;
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
 }

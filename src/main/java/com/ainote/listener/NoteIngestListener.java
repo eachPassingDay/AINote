@@ -3,10 +3,12 @@ package com.ainote.listener;
 import com.ainote.event.NoteIngestEvent;
 import com.ainote.service.NoteService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class NoteIngestListener {
@@ -16,7 +18,7 @@ public class NoteIngestListener {
     @Async
     @EventListener
     public void onNoteIngest(NoteIngestEvent event) {
-        System.out.println("Processing note async: " + event.getNoteId());
+        log.info("Processing note async: {}", event.getNoteId());
         noteService.processNoteAsync(event.getNoteId(), event.getNoteRequest());
     }
 }

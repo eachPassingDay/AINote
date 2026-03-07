@@ -31,3 +31,24 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### 日志文件 ###
+*.log
+
+### 构建过程产生的临时文件 ###
+build_log.txt
+build_result.txt
+full_build.txt
+
+### 本地数据文件（不应上传） ###
+notes_db.json
+vector_store.json
+
+### 编译后的前端静态资源（前端单独部署） ###
+src/main/resources/static/
+
+### 内部开发文档（不随项目上传） ###
+docs/
+
+### 杂项 ###
+{simple}

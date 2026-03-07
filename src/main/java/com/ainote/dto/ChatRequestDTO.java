@@ -7,4 +7,5 @@ public class ChatRequestDTO {
     private String query;
     private String filterDomain;
     private String filterType;
+    private String sessionId;
 }

@@ -4,5 +4,6 @@ public enum NoteStatus {
     PROCESSING,
     COMPLETED,
     MERGED,
-    FAILED
+    FAILED,
+    OUTDATED
 }

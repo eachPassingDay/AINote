@@ -11,7 +11,7 @@ import java.util.Date;
 public class NoteHistoryDTO {
     private Number revisionId;
     private Date revisionDate;
-    private String revisionType; // ADD, MOD, DEL
+    private String revisionType; // 审计操作类型：ADD=新增, MOD=修改, DEL=删除
     private String title;
     private String summary;
     private String status;
